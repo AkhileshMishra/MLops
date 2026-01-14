@@ -102,8 +102,19 @@ def deploy_endpoint(config, estimator):
     except sm_client.exceptions.ClientError:
         print(f"Endpoint {endpoint_name} does not exist, will create...")
     
-    # Deploy
-    predictor = estimator.deploy(
+    # Deploy with explicit entry point for custom inference code
+    # Create a PyTorchModel with the entry_point specified
+    from sagemaker.pytorch import PyTorchModel
+    
+    model = PyTorchModel(
+        model_data=estimator.model_data,
+        role=estimator.role,
+        entry_point='inference.py',
+        framework_version='1.13.1',
+        py_version='py39',
+    )
+    
+    predictor = model.deploy(
         initial_instance_count=1,
         instance_type=config['inference_instance'],
         endpoint_name=endpoint_name,
