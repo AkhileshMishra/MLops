@@ -48,7 +48,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install boto3 sagemaker
+          pip install boto3 "sagemaker[pytorch]>=2.200.0"
 
       - name: Get SageMaker Role ARN
         id: get-role
