@@ -1,0 +1,125 @@
+name: Deploy Infrastructure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/**'
+      - '.github/workflows/deploy-infrastructure.yaml'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - destroy
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: mlops-medical-imaging
+  STACK_NAME: mlops-medical-imaging-stack
+
+jobs:
+  deploy:
+    if: github.event.inputs.action != 'destroy'
+    runs-on: ubuntu-latest
+    outputs:
+      training_bucket: ${{ steps.get-outputs.outputs.training_bucket }}
+      models_bucket: ${{ steps.get-outputs.outputs.models_bucket }}
+      inference_bucket: ${{ steps.get-outputs.outputs.inference_bucket }}
+      sagemaker_role: ${{ steps.get-outputs.outputs.sagemaker_role }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
+
+      - name: Deploy CloudFormation stack
+        run: |
+          aws cloudformation deploy \
+            --template-file infrastructure/mlops-infrastructure.yaml \
+            --stack-name ${{ env.STACK_NAME }} \
+            --parameter-overrides \
+              ProjectName=${{ env.PROJECT_NAME }} \
+              Environment=dev \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+          
+          echo "Stack deployment completed"
+
+      - name: Get stack outputs
+        id: get-outputs
+        run: |
+          TRAINING_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='TrainingDataBucket'].OutputValue" \
+            --output text)
+          
+          MODELS_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ModelArtifactsBucket'].OutputValue" \
+            --output text)
+          
+          INFERENCE_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='InferenceBucket'].OutputValue" \
+            --output text)
+          
+          SAGEMAKER_ROLE=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" \
+            --output text)
+          
+          echo "training_bucket=$TRAINING_BUCKET" >> $GITHUB_OUTPUT
+          echo "models_bucket=$MODELS_BUCKET" >> $GITHUB_OUTPUT
+          echo "inference_bucket=$INFERENCE_BUCKET" >> $GITHUB_OUTPUT
+          echo "sagemaker_role=$SAGEMAKER_ROLE" >> $GITHUB_OUTPUT
+          
+          echo "Training Bucket: $TRAINING_BUCKET"
+          echo "Models Bucket: $MODELS_BUCKET"
+          echo "Inference Bucket: $INFERENCE_BUCKET"
+          echo "SageMaker Role: $SAGEMAKER_ROLE"
+
+  destroy:
+    if: github.event.inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Run cleanup script
+        env:
+          PROJECT_NAME: ${{ env.PROJECT_NAME }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+          STACK_NAME: ${{ env.STACK_NAME }}
+        run: python scripts/cleanup.py --confirm

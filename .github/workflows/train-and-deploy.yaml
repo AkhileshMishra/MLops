@@ -1,0 +1,98 @@
+name: Train and Deploy Model
+
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'Number of training epochs'
+        required: false
+        default: '50'
+        type: string
+      skip_deploy:
+        description: 'Skip endpoint deployment'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: mlops-medical-imaging
+  STACK_NAME: mlops-medical-imaging-stack
+
+jobs:
+  train-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install boto3 sagemaker
+
+      - name: Get SageMaker Role ARN
+        id: get-role
+        run: |
+          SAGEMAKER_ROLE=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" \
+            --output text)
+          echo "sagemaker_role=$SAGEMAKER_ROLE" >> $GITHUB_OUTPUT
+          echo "SageMaker Role: $SAGEMAKER_ROLE"
+
+      - name: Run training pipeline
+        env:
+          PROJECT_NAME: ${{ env.PROJECT_NAME }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+          SAGEMAKER_ROLE_ARN: ${{ steps.get-role.outputs.sagemaker_role }}
+          EPOCHS: ${{ github.event.inputs.epochs || '50' }}
+          TRAINING_INSTANCE: ml.p3.2xlarge
+          INFERENCE_INSTANCE: ml.m5.large
+        run: |
+          if [ "${{ github.event.inputs.skip_deploy }}" == "true" ]; then
+            python scripts/train_pipeline.py --skip-deploy
+          else
+            python scripts/train_pipeline.py
+          fi
+
+      - name: Upload deployment info
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-info
+          path: deployment_info.json
+          if-no-files-found: ignore
+
+      - name: Summary
+        run: |
+          echo "## Training and Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f deployment_info.json ]; then
+            echo "### Deployment Info" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat deployment_info.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Upload a DICOM image to \`s3://${{ env.PROJECT_NAME }}-inference-*/input/\`" >> $GITHUB_STEP_SUMMARY
+          echo "2. Check results in \`s3://${{ env.PROJECT_NAME }}-inference-*/output/\`" >> $GITHUB_STEP_SUMMARY

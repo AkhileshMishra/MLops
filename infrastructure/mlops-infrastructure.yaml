@@ -1,0 +1,272 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: MLOps Infrastructure for Medical Imaging Pipeline
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mlops-medical-imaging
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+  # S3 Buckets
+  TrainingDataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub '${ProjectName}-training-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  ModelArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub '${ProjectName}-models-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  InferenceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    DependsOn: InferenceLambdaPermission
+    Properties:
+      BucketName: !Sub '${ProjectName}-inference-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: input/
+                  - Name: suffix
+                    Value: .dcm
+            Function: !GetAtt InferenceLambda.Arn
+
+  # SageMaker Execution Role
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-sagemaker-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ProjectName}-*'
+                  - !Sub 'arn:aws:s3:::${ProjectName}-*/*'
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SageMakerInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker:InvokeEndpoint
+                Resource: !Sub 'arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/${ProjectName}-endpoint'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ProjectName}-inference-${AWS::AccountId}-${AWS::Region}/*'
+
+  # Lambda Function for Inference
+  InferenceLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-inference-trigger'
+      Runtime: python3.11
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 256
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          ENDPOINT_NAME: !Sub '${ProjectName}-endpoint'
+          OUTPUT_BUCKET: !Sub '${ProjectName}-inference-${AWS::AccountId}-${AWS::Region}'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          sagemaker_runtime = boto3.client('sagemaker-runtime')
+          s3_client = boto3.client('s3')
+          
+          def handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+              
+              endpoint_name = os.environ['ENDPOINT_NAME']
+              output_bucket = os.environ['OUTPUT_BUCKET']
+              
+              results = []
+              
+              for record in event.get('Records', []):
+                  bucket = record['s3']['bucket']['name']
+                  key = record['s3']['object']['key']
+                  
+                  print(f"Processing: s3://{bucket}/{key}")
+                  
+                  try:
+                      # Prepare payload for SageMaker endpoint
+                      payload = json.dumps({
+                          'bucket': bucket,
+                          'key': key
+                      })
+                      
+                      # Invoke SageMaker endpoint
+                      response = sagemaker_runtime.invoke_endpoint(
+                          EndpointName=endpoint_name,
+                          ContentType='application/json',
+                          Body=payload
+                      )
+                      
+                      result = json.loads(response['Body'].read().decode())
+                      print(f"Inference result: {result}")
+                      
+                      # Save result to S3
+                      output_key = f"output/{key.split('/')[-1].replace('.dcm', '')}_result.json"
+                      result_with_metadata = {
+                          'input_file': f"s3://{bucket}/{key}",
+                          'timestamp': datetime.utcnow().isoformat(),
+                          'prediction': result
+                      }
+                      
+                      s3_client.put_object(
+                          Bucket=output_bucket,
+                          Key=output_key,
+                          Body=json.dumps(result_with_metadata, indent=2),
+                          ContentType='application/json'
+                      )
+                      
+                      results.append({
+                          'input': key,
+                          'output': output_key,
+                          'status': 'success',
+                          'result': result
+                      })
+                      
+                  except Exception as e:
+                      print(f"Error processing {key}: {str(e)}")
+                      results.append({
+                          'input': key,
+                          'status': 'error',
+                          'error': str(e)
+                      })
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(results)
+              }
+
+  # Lambda Permission for S3
+  InferenceLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt InferenceLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub 'arn:aws:s3:::${ProjectName}-inference-${AWS::AccountId}-${AWS::Region}'
+
+Outputs:
+  TrainingDataBucket:
+    Value: !Ref TrainingDataBucket
+    Export:
+      Name: !Sub '${ProjectName}-training-bucket'
+  
+  ModelArtifactsBucket:
+    Value: !Ref ModelArtifactsBucket
+    Export:
+      Name: !Sub '${ProjectName}-models-bucket'
+  
+  InferenceBucket:
+    Value: !Ref InferenceBucket
+    Export:
+      Name: !Sub '${ProjectName}-inference-bucket'
+  
+  SageMakerRoleArn:
+    Value: !GetAtt SageMakerExecutionRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-sagemaker-role-arn'
+  
+  LambdaFunctionArn:
+    Value: !GetAtt InferenceLambda.Arn
+    Export:
+      Name: !Sub '${ProjectName}-lambda-arn'

@@ -1,0 +1,87 @@
+name: Cleanup All Resources
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "DELETE" to confirm resource deletion'
+        required: true
+        type: string
+      keep_iam:
+        description: 'Keep IAM roles'
+        required: false
+        default: false
+        type: boolean
+      keep_buckets:
+        description: 'Keep S3 buckets (data preserved)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: mlops-medical-imaging
+  STACK_NAME: mlops-medical-imaging-stack
+
+jobs:
+  cleanup:
+    if: github.event.inputs.confirm == 'DELETE'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Run cleanup
+        env:
+          PROJECT_NAME: ${{ env.PROJECT_NAME }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+          STACK_NAME: ${{ env.STACK_NAME }}
+        run: |
+          ARGS="--confirm"
+          if [ "${{ github.event.inputs.keep_iam }}" == "true" ]; then
+            ARGS="$ARGS --keep-iam"
+          fi
+          if [ "${{ github.event.inputs.keep_buckets }}" == "true" ]; then
+            ARGS="$ARGS --keep-buckets"
+          fi
+          python scripts/cleanup.py $ARGS
+
+      - name: Summary
+        run: |
+          echo "## Cleanup Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All MLOps resources have been deleted." >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event.inputs.keep_iam }}" == "true" ]; then
+            echo "- IAM roles were preserved" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "${{ github.event.inputs.keep_buckets }}" == "true" ]; then
+            echo "- S3 buckets were preserved" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  reject:
+    if: github.event.inputs.confirm != 'DELETE'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject
+        run: |
+          echo "::error::Cleanup cancelled. You must type 'DELETE' to confirm."
+          exit 1
