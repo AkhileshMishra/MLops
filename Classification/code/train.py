@@ -246,8 +246,12 @@ def train(args):
             top_p, top_class=torch.topk(y_pred2,1)
             y_pred_class=[x.item() for x in top_class]
             
-            y_onehot = [y_trans(i) for i in decollate_batch(y)]
-            y_pred_act = [y_pred_trans(i) for i in decollate_batch(top_class)]
+            # Move tensors to CPU for metric calculation to avoid device mismatch
+            y_cpu = y.cpu()
+            top_class_cpu = top_class.cpu()
+            
+            y_onehot = [y_trans(i) for i in decollate_batch(y_cpu)]
+            y_pred_act = [y_pred_trans(i) for i in decollate_batch(top_class_cpu)]
              
             print("ground truth is : ",  y)
             print("predicted truth is : ",  y_pred_class)
@@ -267,7 +271,7 @@ def train(args):
             
             
             ## second metrics: on accuracy 
-            acc_value = torch.eq(torch.FloatTensor(y_pred_class), y)
+            acc_value = torch.eq(torch.FloatTensor(y_pred_class), y_cpu)
             
             acc_metric = acc_value.sum().item() / len(acc_value)
             metric_values.append(acc_metric)
