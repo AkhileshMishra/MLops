@@ -22,7 +22,7 @@ from PIL import Image
 from monai.metrics import ROCAUCMetric,get_confusion_matrix,ConfusionMatrixMetric
 from monai.config import print_config
 from monai.transforms import \
-    Compose, LoadImage, Resize, ScaleIntensity, ToTensor, RandRotate, RandFlip, RandZoom, Activations, AddChannel, AsDiscrete, EnsureType
+    Compose, LoadImage, Resize, ScaleIntensity, ToTensor, RandRotate, RandFlip, RandZoom, Activations, AsDiscrete, EnsureType
 from monai.networks.nets import densenet121
 from monai.data import decollate_batch
 
