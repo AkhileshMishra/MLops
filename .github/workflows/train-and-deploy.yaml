@@ -49,7 +49,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install boto3 'sagemaker[pytorch]>=2.200.0'
+          pip install boto3 'sagemaker[pytorch]>=2.200.0,<3.0.0'
           python -c "from sagemaker.pytorch.estimator import PyTorch; print('sagemaker.pytorch OK')"
 
       - name: Get SageMaker Role ARN
