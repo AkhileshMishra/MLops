@@ -82,15 +82,24 @@ def deploy_endpoint(config, estimator):
     
     print(f"Deploying endpoint: {endpoint_name}")
     
-    # Check if endpoint exists
+    # Check if endpoint exists and delete it first if it does
     sm_client = boto3.client('sagemaker', region_name=config['region'])
     
     try:
         sm_client.describe_endpoint(EndpointName=endpoint_name)
-        endpoint_exists = True
-        print(f"Endpoint {endpoint_name} exists, will update...")
+        print(f"Endpoint {endpoint_name} exists, deleting before recreating...")
+        sm_client.delete_endpoint(EndpointName=endpoint_name)
+        # Wait for endpoint to be deleted
+        import time
+        while True:
+            try:
+                sm_client.describe_endpoint(EndpointName=endpoint_name)
+                print("Waiting for endpoint deletion...")
+                time.sleep(30)
+            except sm_client.exceptions.ClientError:
+                print("Endpoint deleted.")
+                break
     except sm_client.exceptions.ClientError:
-        endpoint_exists = False
         print(f"Endpoint {endpoint_name} does not exist, will create...")
     
     # Deploy
@@ -100,7 +109,6 @@ def deploy_endpoint(config, estimator):
         endpoint_name=endpoint_name,
         serializer=JSONSerializer(),
         deserializer=JSONDeserializer(),
-        update_endpoint=endpoint_exists,
     )
     
     print(f"Endpoint deployed: {endpoint_name}")
