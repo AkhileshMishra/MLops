@@ -6,7 +6,8 @@ Trains the COVID CT Classification model and deploys endpoint
 
 import boto3
 import sagemaker
-from sagemaker.pytorch import PyTorch, PyTorchModel
+from sagemaker.pytorch.estimator import PyTorch
+from sagemaker.pytorch.model import PyTorchModel
 from sagemaker.serializers import JSONSerializer
 from sagemaker.deserializers import JSONDeserializer
 import argparse

@@ -49,9 +49,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install boto3 torch torchvision
-          pip install 'sagemaker>=2.200.0'
-          python -c "from sagemaker.pytorch import PyTorch; print('sagemaker.pytorch OK')"
+          pip install boto3 'sagemaker[pytorch]>=2.200.0'
+          python -c "from sagemaker.pytorch.estimator import PyTorch; print('sagemaker.pytorch OK')"
 
       - name: Get SageMaker Role ARN
         id: get-role
