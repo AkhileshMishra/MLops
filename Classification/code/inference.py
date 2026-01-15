@@ -55,7 +55,8 @@ def model_fn(model_dir):
     print("inside model_dir is", os.listdir(model_dir))
     with open(os.path.join(model_dir, 'model.pth'), 'rb') as f:
         #model.load_state_dict(torch.load(f)) choose the right way to load your model
-        model = torch.load(f,map_location=torch.device('cpu') )
+        # weights_only=False is required for PyTorch 2.6+ to load models saved with older versions
+        model = torch.load(f, map_location=torch.device('cpu'), weights_only=False)
     return model.to(device)   
 
 
