@@ -2,3 +2,5 @@ monai
 itk
 pillow
 pandas
+pydicom
+imagecodecs
