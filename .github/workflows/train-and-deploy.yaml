@@ -6,10 +6,20 @@ on:
       epochs:
         description: 'Number of training epochs'
         required: false
-        default: '50'
+        default: '10'
         type: string
       skip_deploy:
         description: 'Skip endpoint deployment'
+        required: false
+        default: false
+        type: boolean
+      create_only:
+        description: 'Only create/update pipeline, do not execute'
+        required: false
+        default: false
+        type: boolean
+      legacy_mode:
+        description: 'Use legacy direct training (no pipeline)'
         required: false
         default: false
         type: boolean
@@ -49,8 +59,9 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install boto3 'sagemaker[pytorch]>=2.200.0,<3.0.0'
+          pip install boto3 "sagemaker[pytorch]>=2.200.0,<3.0.0"
           python -c "from sagemaker.pytorch.estimator import PyTorch; print('sagemaker.pytorch OK')"
+          python -c "from sagemaker.workflow.pipeline import Pipeline; print('sagemaker.workflow OK')"
 
       - name: Get SageMaker Role ARN
         id: get-role
@@ -67,15 +78,22 @@ jobs:
           PROJECT_NAME: ${{ env.PROJECT_NAME }}
           AWS_REGION: ${{ env.AWS_REGION }}
           SAGEMAKER_ROLE_ARN: ${{ steps.get-role.outputs.sagemaker_role }}
-          EPOCHS: ${{ github.event.inputs.epochs || '50' }}
+          EPOCHS: ${{ github.event.inputs.epochs || '10' }}
           TRAINING_INSTANCE: ml.p3.2xlarge
           INFERENCE_INSTANCE: ml.m5.large
         run: |
+          ARGS=""
           if [ "${{ github.event.inputs.skip_deploy }}" == "true" ]; then
-            python scripts/train_pipeline.py --skip-deploy
-          else
-            python scripts/train_pipeline.py
+            ARGS="$ARGS --skip-deploy"
           fi
+          if [ "${{ github.event.inputs.create_only }}" == "true" ]; then
+            ARGS="$ARGS --create-only"
+          fi
+          if [ "${{ github.event.inputs.legacy_mode }}" == "true" ]; then
+            ARGS="$ARGS --legacy"
+          fi
+          echo "Running: python scripts/train_pipeline.py $ARGS"
+          python scripts/train_pipeline.py $ARGS
 
       - name: Upload deployment info
         uses: actions/upload-artifact@v4
@@ -88,6 +106,15 @@ jobs:
         run: |
           echo "## Training and Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pipeline Mode" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event.inputs.legacy_mode }}" == "true" ]; then
+            echo "Used **legacy direct training** mode" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Used **SageMaker Pipelines** mode" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "View your pipeline in [SageMaker Studio](https://console.aws.amazon.com/sagemaker/home?region=${{ env.AWS_REGION }}#/pipelines)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
           if [ -f deployment_info.json ]; then
             echo "### Deployment Info" >> $GITHUB_STEP_SUMMARY
             echo '```json' >> $GITHUB_STEP_SUMMARY
@@ -96,5 +123,6 @@ jobs:
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
-          echo "1. Upload a DICOM image to \`s3://${{ env.PROJECT_NAME }}-inference-*/input/\`" >> $GITHUB_STEP_SUMMARY
-          echo "2. Check results in \`s3://${{ env.PROJECT_NAME }}-inference-*/output/\`" >> $GITHUB_STEP_SUMMARY
+          echo "1. View pipeline in SageMaker Studio → Pipelines" >> $GITHUB_STEP_SUMMARY
+          echo "2. Upload a DICOM image to \`s3://${{ env.PROJECT_NAME }}-inference-*/input/\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Check results in \`s3://${{ env.PROJECT_NAME }}-inference-*/output/\`" >> $GITHUB_STEP_SUMMARY

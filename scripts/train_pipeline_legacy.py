@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-SageMaker Pipeline Script
-Creates and executes a SageMaker Pipeline for COVID CT Classification model
-with Training, Model Registration, and Deployment steps.
+SageMaker Training Pipeline Script
+Trains the COVID CT Classification model and deploys endpoint
 """
 
 import boto3
@@ -11,13 +10,6 @@ from sagemaker.pytorch.estimator import PyTorch
 from sagemaker.pytorch.model import PyTorchModel
 from sagemaker.serializers import JSONSerializer
 from sagemaker.deserializers import JSONDeserializer
-from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.steps import TrainingStep, CreateModelStep
-from sagemaker.workflow.model_step import ModelStep
-from sagemaker.workflow.pipeline_context import PipelineSession
-from sagemaker.workflow.parameters import ParameterInteger, ParameterString
-from sagemaker.model import Model
-from sagemaker.inputs import TrainingInput
 import argparse
 import os
 import time
@@ -46,26 +38,19 @@ def upload_training_data(sess, bucket, local_path='Classification/data'):
     print(f"Training data uploaded to: {s3_path}")
     return s3_path
 
-def create_pipeline(config, pipeline_session, training_data_uri):
-    """Create SageMaker Pipeline with Training and Model steps"""
-    print("Creating SageMaker Pipeline...")
+def run_training(config, sess, training_data_uri):
+    """Run SageMaker training job"""
+    print("Starting SageMaker training job...")
     
     account_id = boto3.client('sts').get_caller_identity()['Account']
     models_bucket = f"{config['project_name']}-models-{account_id}-{config['region']}"
-    pipeline_name = f"{config['project_name']}-pipeline"
     
-    # Pipeline parameters
-    epochs_param = ParameterInteger(name="Epochs", default_value=config['epochs'])
-    training_instance_param = ParameterString(name="TrainingInstance", default_value=config['training_instance'])
-    
-    # Define metrics to track
     metrics = [
         {"Name": "train:loss", "Regex": "average loss: ([0-9\\.]+)"},
         {"Name": "train:f1", "Regex": "f1 score is:([0-9\\.]+)"},
         {"Name": "train:accuracy", "Regex": "current AUC: ([0-9\\.]+)"},
     ]
     
-    # Create PyTorch Estimator
     estimator = PyTorch(
         entry_point='train.py',
         source_dir='Classification/code',
@@ -73,60 +58,25 @@ def create_pipeline(config, pipeline_session, training_data_uri):
         framework_version='1.13.1',
         py_version='py39',
         instance_count=1,
-        instance_type=training_instance_param,
+        instance_type=config['training_instance'],
         output_path=f"s3://{models_bucket}/training-output",
         hyperparameters={
             'seed': 42,
             'lr': 1e-5,
-            'epochs': epochs_param,
+            'epochs': config['epochs'],
             'batch-size': 4,
         },
         metric_definitions=metrics,
         max_run=3600,  # 1 hour max
         base_job_name=f"{config['project_name']}-training",
-        sagemaker_session=pipeline_session,
     )
     
-    # Step 1: Training Step
-    training_step = TrainingStep(
-        name="TrainModel",
-        estimator=estimator,
-        inputs={
-            "train": TrainingInput(
-                s3_data=training_data_uri,
-                content_type="application/x-image"
-            )
-        },
-    )
+    estimator.fit({'train': training_data_uri}, wait=True)
     
-    # Step 2: Create Model Step
-    model = Model(
-        image_uri=estimator.training_image_uri(),
-        model_data=training_step.properties.ModelArtifacts.S3ModelArtifacts,
-        role=config['role_arn'],
-        sagemaker_session=pipeline_session,
-        entry_point='inference.py',
-        source_dir='Classification/code',
-    )
-    
-    model_step = ModelStep(
-        name="RegisterModel",
-        step_args=model.create(
-            instance_type=config['inference_instance'],
-        ),
-    )
-    
-    # Create the pipeline
-    pipeline = Pipeline(
-        name=pipeline_name,
-        parameters=[epochs_param, training_instance_param],
-        steps=[training_step, model_step],
-        sagemaker_session=pipeline_session,
-    )
-    
-    return pipeline, training_step
+    print(f"Training completed. Model artifacts: {estimator.model_data}")
+    return estimator
 
-def deploy_endpoint(config, model_data):
+def deploy_endpoint(config, estimator):
     """Deploy or update SageMaker endpoint"""
     endpoint_name = f"{config['project_name']}-endpoint"
     
@@ -134,6 +84,7 @@ def deploy_endpoint(config, model_data):
     
     # Check if endpoint exists and delete it first if it does
     sm_client = boto3.client('sagemaker', region_name=config['region'])
+    import time
     
     try:
         sm_client.describe_endpoint(EndpointName=endpoint_name)
@@ -171,15 +122,15 @@ def deploy_endpoint(config, model_data):
         print(f"Note: Could not clean up models: {e}")
     
     # Deploy with explicit entry point for custom inference code
-    sess = sagemaker.Session()
+    # Create a PyTorchModel with the entry_point specified
+    from sagemaker.pytorch import PyTorchModel
+    
     model = PyTorchModel(
-        model_data=model_data,
-        role=config['role_arn'],
+        model_data=estimator.model_data,
+        role=estimator.role,
         entry_point='inference.py',
-        source_dir='Classification/code',
         framework_version='1.13.1',
         py_version='py39',
-        sagemaker_session=sess,
     )
     
     predictor = model.deploy(
@@ -193,15 +144,14 @@ def deploy_endpoint(config, model_data):
     print(f"Endpoint deployed: {endpoint_name}")
     return predictor
 
-def save_deployment_info(config, model_data, pipeline_execution_arn=None):
+def save_deployment_info(config, estimator):
     """Save deployment information for reference"""
     account_id = boto3.client('sts').get_caller_identity()['Account']
     
     info = {
         'endpoint_name': f"{config['project_name']}-endpoint",
-        'model_data': model_data,
-        'pipeline_name': f"{config['project_name']}-pipeline",
-        'pipeline_execution_arn': pipeline_execution_arn,
+        'model_data': estimator.model_data,
+        'training_job_name': estimator.latest_training_job.name,
         'inference_bucket': f"{config['project_name']}-inference-{account_id}-{config['region']}",
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime()),
     }
@@ -213,11 +163,9 @@ def save_deployment_info(config, model_data, pipeline_execution_arn=None):
     return info
 
 def main():
-    parser = argparse.ArgumentParser(description='Train and deploy medical imaging model using SageMaker Pipelines')
+    parser = argparse.ArgumentParser(description='Train and deploy medical imaging model')
     parser.add_argument('--skip-training', action='store_true', help='Skip training, only deploy')
     parser.add_argument('--skip-deploy', action='store_true', help='Skip deployment')
-    parser.add_argument('--create-only', action='store_true', help='Only create/update pipeline, do not execute')
-    parser.add_argument('--legacy', action='store_true', help='Use legacy direct training (no pipeline)')
     args = parser.parse_args()
     
     config = get_config()
@@ -240,83 +188,23 @@ def main():
     print(f"Configuration: {json.dumps(config, indent=2)}")
     
     # Initialize SageMaker session
+    sess = sagemaker.Session()
     account_id = boto3.client('sts').get_caller_identity()['Account']
     training_bucket = f"{config['project_name']}-training-{account_id}-{config['region']}"
-    
-    # Use legacy mode if requested
-    if args.legacy:
-        print("Using legacy direct training mode...")
-        from train_pipeline_legacy import main as legacy_main
-        return legacy_main()
-    
-    # Create pipeline session for pipeline mode
-    pipeline_session = PipelineSession()
-    sess = sagemaker.Session()
     
     if not args.skip_training:
         # Upload training data
         training_data_uri = upload_training_data(sess, training_bucket)
         
-        # Create the pipeline
-        pipeline, training_step = create_pipeline(config, pipeline_session, training_data_uri)
-        
-        # Upsert (create or update) the pipeline
-        print("Upserting pipeline...")
-        pipeline.upsert(role_arn=config['role_arn'])
-        print(f"Pipeline created/updated: {pipeline.name}")
-        
-        if args.create_only:
-            print("Pipeline created. Skipping execution (--create-only flag).")
-            return
-        
-        # Execute the pipeline
-        print("Starting pipeline execution...")
-        execution = pipeline.start(
-            parameters={
-                "Epochs": config['epochs'],
-                "TrainingInstance": config['training_instance'],
-            }
-        )
-        
-        print(f"Pipeline execution started: {execution.arn}")
-        
-        # Wait for pipeline to complete
-        print("Waiting for pipeline execution to complete...")
-        execution.wait()
-        
-        # Get the execution status
-        execution_status = execution.describe()
-        print(f"Pipeline execution status: {execution_status['PipelineExecutionStatus']}")
-        
-        if execution_status['PipelineExecutionStatus'] != 'Succeeded':
-            raise Exception(f"Pipeline execution failed: {execution_status}")
-        
-        # Get the model artifacts from the training step
-        steps = execution.list_steps()
-        training_step_result = None
-        for step in steps:
-            if step['StepName'] == 'TrainModel':
-                training_step_result = step
-                break
-        
-        if not training_step_result:
-            raise Exception("Could not find TrainModel step in pipeline execution")
-        
-        # Get model data from the training job
-        sm_client = boto3.client('sagemaker', region_name=config['region'])
-        training_job_arn = training_step_result['Metadata']['TrainingJob']['Arn']
-        training_job_name = training_job_arn.split('/')[-1]
-        training_job_desc = sm_client.describe_training_job(TrainingJobName=training_job_name)
-        model_data = training_job_desc['ModelArtifacts']['S3ModelArtifacts']
-        
-        print(f"Training completed. Model artifacts: {model_data}")
+        # Run training
+        estimator = run_training(config, sess, training_data_uri)
         
         if not args.skip_deploy:
             # Deploy endpoint
-            deploy_endpoint(config, model_data)
+            deploy_endpoint(config, estimator)
             
             # Save deployment info
-            save_deployment_info(config, model_data, execution.arn)
+            save_deployment_info(config, estimator)
     
     print("Pipeline completed successfully!")
 
