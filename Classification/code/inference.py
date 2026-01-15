@@ -93,7 +93,7 @@ def input_fn(serialized_input_data, content_type):
         bucket=data['bucket']
         image_uri=data['key']
         label=["normal"]
-        download_file_name = image_uri.split('/')[-1]
+        download_file_name = '/tmp/' + image_uri.split('/')[-1]  # Use /tmp/ for writable directory
         print ("<<<<download_file_name ", download_file_name)
         ##download from s3 
         print("loaded label is:" , label)
