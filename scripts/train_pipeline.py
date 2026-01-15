@@ -84,13 +84,13 @@ def deploy_endpoint(config, estimator):
     
     # Check if endpoint exists and delete it first if it does
     sm_client = boto3.client('sagemaker', region_name=config['region'])
+    import time
     
     try:
         sm_client.describe_endpoint(EndpointName=endpoint_name)
         print(f"Endpoint {endpoint_name} exists, deleting before recreating...")
         sm_client.delete_endpoint(EndpointName=endpoint_name)
         # Wait for endpoint to be deleted
-        import time
         while True:
             try:
                 sm_client.describe_endpoint(EndpointName=endpoint_name)
@@ -101,6 +101,25 @@ def deploy_endpoint(config, estimator):
                 break
     except sm_client.exceptions.ClientError:
         print(f"Endpoint {endpoint_name} does not exist, will create...")
+    
+    # Also delete the endpoint configuration if it exists
+    try:
+        sm_client.describe_endpoint_config(EndpointConfigName=endpoint_name)
+        print(f"Endpoint config {endpoint_name} exists, deleting...")
+        sm_client.delete_endpoint_config(EndpointConfigName=endpoint_name)
+        print("Endpoint config deleted.")
+    except sm_client.exceptions.ClientError:
+        print(f"Endpoint config {endpoint_name} does not exist.")
+    
+    # Also delete any SageMaker models with the same prefix to avoid conflicts
+    try:
+        models = sm_client.list_models(NameContains=endpoint_name)
+        for model_summary in models.get('Models', []):
+            model_name = model_summary['ModelName']
+            print(f"Deleting existing model: {model_name}")
+            sm_client.delete_model(ModelName=model_name)
+    except Exception as e:
+        print(f"Note: Could not clean up models: {e}")
     
     # Deploy with explicit entry point for custom inference code
     # Create a PyTorchModel with the entry_point specified
